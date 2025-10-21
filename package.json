@@ -1,0 +1,24 @@
+{
+  "name": "powerdns-backend-api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Node.js backend to manage PowerDNS using REST API routes",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.19.1",
+    "nodemon": "^3.1.10",
+    "whoiser": "^2.0.0-beta.9"
+  }
+}
