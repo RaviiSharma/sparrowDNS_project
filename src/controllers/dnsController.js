@@ -30,6 +30,7 @@ const client = axios.create({
 });
 
 import mongoose from "mongoose";
+import dns from 'dns/promises';
 
 // ✅ Controller: System Health Check
 export const systemHealthController = async (req, res) => {
@@ -800,58 +801,123 @@ export const createZoneAndImportController = async (req, res) => {
   }
 };
 
-/**__________________________________________scanDomainNameServer_______________________________________________________________ */
+/**__________________________________________checkNameserverController_______________________________________________________________ */
 
 
-// import { default as whoiser } from "whoiser";
 
 
-// export const scanDomainNameSever = async (req, res) => {
-//   try {
-//     const { domain } = req.body;
-//     if (!domain) {
-//       return res.status(400).json({ success: false, message: "Domain name is required." });
-//     }
 
-//     console.log(`🔍 Scanning domain: ${domain}`);
+import whois from "whois";
 
-//     // Dynamically import whoiser and perform WHOIS lookup
-//     const whoiserModule = await import('whoiser');
-//     const data = await whoiserModule.default(domain);
+export const checkNameserverController = async (req, res) => {
+  console.log("checkNameserverController");
 
-//     const domainData = data[domain] || data[Object.keys(data)[0]]; // sometimes whoiser returns domain in lowercase
-//     const currentNameservers = domainData?.nameServers || [];
+  const { domain } = req.body;
+  if (!domain) {
+    return res.status(400).json({
+      success: false,
+      message: "Domain is required",
+    });
+  }
 
-//     // Define SparrowDNS official nameservers
-//     const sparrowNameservers = ["ns1.sparrowdns.com", "ns2.sparrowdns.com"];
+  try {
+    // Force WHOIS to the correct registry server for the TLD
+    const tld = domain.toLowerCase().split('.').pop();
+    const whoisServers = {
+      shop: 'whois.nic.shop',
+      mom: 'whois.nic.mom',
+      com: 'whois.verisign-grs.com',
+      net: 'whois.verisign-grs.com',
+      org: 'whois.pir.org',
+      info: 'whois.afilias.net',
+      biz: 'whois.neulevel.biz',
+      io: 'whois.nic.io',
+      in:'whois.nixiregistry.in'
+    };
 
-//     // Compare (case-insensitive)
-//     const usingSparrowDNS = currentNameservers.some(ns =>
-//       sparrowNameservers.includes(ns.toLowerCase())
-//     );
+    // Prefer registry server; avoid IANA (returns TLD data).
+    const registry = whoisServers[tld];
+    const options = registry
+      ? { server: registry, timeout: 20000, follow: 0 }
+      : { timeout: 20000, follow: 3 };
 
-//     let message = "";
-//     if (usingSparrowDNS) {
-//       message = "✅ Domain is already using SparrowDNS nameservers.";
-//     } else {
-//       message = "⚠️ Please update your nameservers to ns1.sparrowdns.com and ns2.sparrowdns.com.";
-//     }
+    const whoisData = await new Promise((resolve, reject) => {
+      whois.lookup(domain, options, (err, data) => {
+        if (err) {
+          console.warn("WHOIS lookup error:", err.message);
+          return resolve(null);
+        }
+        resolve(data);
+      });
+    });
 
-//     return res.status(200).json({
-//       success: true,
-//       domain,
-//       currentNameservers,
-//       sparrowNameservers,
-//       usingSparrowDNS,
-//       message
-//     });
+    if (!whoisData) {
+      return res.status(200).json({
+        success: false,
+        domain,
+        message: "⚠️ WHOIS server did not respond in time.",
+        currentNameservers: [],
+      });
+    }
 
-//   } catch (error) {
-//     console.error("WHOIS scan error:", error.message);
-//     return res.status(500).json({
-//       success: false,
-//       message: "Failed to scan domain.",
-//       error: error.message
-//     });
-//   }
-// };
+    // Robustly parse NS hostnames (strip extra tokens/IPs)
+    const patterns = [
+      /^Name Server:\s*(.+)$/gim,
+      /^nameserver:\s*(.+)$/gim,
+      /^nserver:\s*(.+)$/gim,
+      /^Name Servers?:\s*(.+)$/gim,  
+    ];
+
+    let matches = [];
+    for (const re of patterns) {
+      const found = whoisData.match(re);
+      if (found) matches = matches.concat(found);
+    }
+
+    let servers = matches
+      .map(m => m.split(':')[1]?.trim())
+      .filter(Boolean)
+      .map(s => s.split(/\s+/)[0].toLowerCase().replace(/\.$/, ''))
+      .filter(Boolean);
+
+    // Remove registry glue like a.nic.tld, b.nic.tld etc.
+    servers = servers.filter(ns => !ns.match(/^[a-d]\.nic\.[a-z0-9-]+$/));
+
+    // Remove duplicates
+    const uniqueServers = [...new Set(servers)];
+
+    // Your allowed nameservers
+    const allowedServers = ["ns1.in.select", "ns2.in.select"];
+    const isUsingOurNS = uniqueServers.some((s) =>
+      allowedServers.includes(s)
+    );
+
+    return res.status(200).json({
+      success: true,
+      domain,
+      currentNameservers: uniqueServers,
+      usingOurNameservers: isUsingOurNS,
+      message:
+        uniqueServers.length === 0
+          ? "⚠️ No nameservers found in WHOIS response."
+          : isUsingOurNS
+          ? "✅ Domain is already using SparrowDNS nameservers."
+          : "⚠️ Domain is NOT using SparrowDNS nameservers.",
+    });
+  } catch (error) {
+    console.error("Unexpected error:", error.message);
+    return res.status(200).json({
+      success: false,
+      domain,
+      message: "⚠️ Failed to fetch WHOIS info safely.",
+      currentNameservers: [],
+      error: error.message,
+    });
+  }
+};
+
+
+
+
+
+

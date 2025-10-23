@@ -1,16 +1,23 @@
 import express from 'express';
-import { createZone, addRecord, listZones, getRecord, updateRecord, deleteRecord, getZoneByName, deleteZone, getServerStatus,systemHealthController } from '../controllers/dnsController.js';
+import { createZone, addRecord, listZones, getRecord, updateRecord, deleteRecord, getZoneByName, deleteZone, getServerStatus,systemHealthController,} from '../controllers/dnsController.js';
 import{userRegistration} from '../controllers/userController.js';
 
 import { scanDomainController } from '../controllers/dnsController.js';
 
 import { createZoneAndImportController } from "../controllers/dnsController.js";
 
-// import {scanDomainNameSever} from "../controllers/dnsController.js";
+import { checkNameserverController } from "../controllers/dnsController.js";
+
+
+
+
+// scan nameservers for a domain
 
 const router = express.Router();
-//
-// router.post("/dns/scanDomainNameSever", scanDomainNameSever);
+// legacy (commented):
+router.post("/dns/check-nameserver", checkNameserverController);
+
+
 
 // POST /api/dns/import-zone
 router.post("/dns/import-zone", createZoneAndImportController);
