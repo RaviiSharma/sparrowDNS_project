@@ -439,4 +439,73 @@ export const importRecords = async (domain, records) => {
   }
 };
 
+/** for super admin , to get all details */
+
+import StatsModel from '../models/statsModel.js';
+
+const POWERDNS_URL = `${process.env.PDNS_URL}/servers/localhost/statistics`;
+const PDNS_API_KEY = process.env.PDNS_API_KEY;
+
+export const fetchDNSQueryStats = async () => {
+  try {
+    const response = await axios.get(POWERDNS_URL, {
+      headers: {
+        'X-API-Key': PDNS_API_KEY
+      }
+    });
+    console.log('PDNS stats API response:', response.data);
+
+    const statsArray = Array.isArray(response.data) ? response.data : response.data.statistics || [];
+    const udpQueriesObj = statsArray.find(x => x.name === 'udp-queries');
+    const tcpQueriesObj = statsArray.find(x => x.name === 'tcp-queries');
+    const latencyObj    = statsArray.find(x => x.name === 'latency');
+
+    const udpQueries = udpQueriesObj ? +udpQueriesObj.value : 0;
+    const tcpQueries = tcpQueriesObj ? +tcpQueriesObj.value : 0;
+    const dnsQueries = udpQueries + tcpQueries;
+    const latency    = latencyObj ? +latencyObj.value : 0;
+
+    // Round to the start of this hour for uniqueness
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+
+    // Yesterday's hour for comparison
+    const yesterday = new Date(roundedHour.getTime() - 24 * 60 * 60 * 1000);
+
+    // Store the stat for this hour (upsert ensures one per hour)
+    await StatsModel.updateOne(
+      { hour: roundedHour },
+      { hour: roundedHour, dnsQueries, latency },
+      { upsert: true }
+    );
+
+    // Find yesterday's stat by rounded hour
+    const yesterdayStat = await StatsModel.findOne({ hour: yesterday });
+
+    let changeFromYesterday = 'N/A';
+    if (yesterdayStat && yesterdayStat.dnsQueries !== undefined && yesterdayStat.dnsQueries !== 0) {
+      changeFromYesterday = (((dnsQueries - yesterdayStat.dnsQueries) / yesterdayStat.dnsQueries) * 100).toFixed(1) + '%';
+      if (+changeFromYesterday > 0) changeFromYesterday = '+' + changeFromYesterday;
+    }
+
+    return {
+      status: true,
+      data: {
+        totalQueries24h: dnsQueries,
+        avgResponseTime: latency + 'ms',
+        changeFromYesterday
+      }
+    };
+  } catch (error) {
+    return {
+      status: false,
+      message: 'Failed to fetch DNS stats from PowerDNS',
+      error: error.message
+    };
+  }
+};
+
+
+
+
 export { listZonesService, createZoneService, addRecordService, getRecordService, updateRecordService, deleteRecordService, getZoneByNameService, deleteZoneService, };

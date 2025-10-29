@@ -225,6 +225,7 @@ export const createZone = async (req, res) => {
   }
 };
 
+/**            getZoneByName                       */
 
 export const getZoneByName = async (req, res) => {
   try {
@@ -234,21 +235,56 @@ export const getZoneByName = async (req, res) => {
       return res.status(400).send({ status: false, message: 'Zone name (string) is required.' });
     }
 
-    const zoneData = await getZoneByNameService(zoneName);
+    // Start latency timer
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+    const start = Date.now();
 
+    let zoneData;
+    try {
+      zoneData = await getZoneByNameService(zoneName);
+    } catch (serviceErr) {
+      // Service error handling
+      console.error('Service error in getZoneByNameService:', serviceErr);
+      return res.status(502).send({ status: false, message: 'Zone fetch service failed.', error: serviceErr.message });
+    }
+    const lastMeasuredLatency = Date.now() - start;
+
+    // Handle notFound or other responses
     if (zoneData?.notFound) {
+      await ZoneStats.updateOne(
+        { zone: zoneName, hour: roundedHour },
+        { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+        { upsert: true }
+      );
       return res.status(404).send({ status: false, message: `Zone '${zoneName}' not found.` });
     }
+
+    // In case zoneData is empty or null
+    if (!zoneData) {
+      await ZoneStats.updateOne(
+        { zone: zoneName, hour: roundedHour },
+        { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+        { upsert: true }
+      );
+      return res.status(404).send({ status: false, message: `No data found for zone '${zoneName}'.` });
+    }
+
+    // Save query stats (success case)
+    await ZoneStats.updateOne(
+      { zone: zoneName, hour: roundedHour },
+      { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+      { upsert: true }
+    );
 
     return res.status(200).send({
       status: true,
       message: `Zone '${zoneName}' fetched successfully.`,
       data: zoneData,
     });
-
   } catch (err) {
     console.error('Error in getZoneByName controller:', err);
-    return res.status(500).send({ status: false, message: 'Internal Server Error.' });
+    return res.status(500).send({ status: false, message: 'Internal Server Error.', error: err.message });
   }
 };
 
@@ -421,14 +457,31 @@ export const addRecord = async (req, res) => {
       return res.status(400).send({ status: false, message: 'TTL must be a number greater than or equal to 60.' });
     }
 
+  
+
     // ===== Service Call =====
+
+    // Start measuring latency before the actual operation
+    const start = Date.now();
     const data = await addRecordService(req.body);
+    const lastMeasuredLatency = Date.now() - start;
 
     // ✅ Handle zone not found
     if (data?.notFound) {
       return res.status(404).send({ status: false, message: `Zone '${zone}' not found in PowerDNS.` });
     }
 
+    // Save zone query statistics
+
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+    await ZoneStats.updateOne(
+      { zone: zone, hour: roundedHour },
+      { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+      { upsert: true }
+    );
+    
+  
     return res.status(201).send({
       status: true,
       message: 'Record added successfully.',
@@ -459,8 +512,16 @@ export const getRecord = async (req, res) => {
     if (type && typeof type !== 'string') {
       return res.status(400).send({ status: false, message: 'type must be a string if provided.' });
     }
+    /** When a query is processed for a zone */
+    // --- Add per-zone query stats logging here ---
+    // Save zone query statistics
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
 
+    // Start measuring latency
+    const start = Date.now();
     const data = await getRecordService({ zone, recordName, type });
+    const lastMeasuredLatency = Date.now() - start;
 
     // ✅ Handle zone not found
     if (data?.notFound) {
@@ -471,6 +532,12 @@ export const getRecord = async (req, res) => {
     if (!data || data.length === 0) {
       return res.status(404).send({ status: false, message: 'No record found for the given zone/criteria.' });
     }
+
+    await ZoneStats.updateOne(
+      { zone, hour: roundedHour },
+      { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+      { upsert: true }
+    );
 
     return res.status(200).send({
       status: true,
@@ -484,6 +551,8 @@ export const getRecord = async (req, res) => {
     return res.status(500).send({ status: false, message: 'Internal Server Error.' });
   }
 };
+
+
 /** ================================
  *  UPDATE RECORD CONTROLLER
  *  ================================ */
@@ -492,34 +561,22 @@ export const updateRecord = async (req, res) => {
   try {
     const { zone, recordName, type, records, ttl, newRecordName } = req.body;
 
-    const data = await updateRecordService({ zone, recordName, type, records, ttl, newRecordName });
-    
-    if (data?.notFound) {
-      return res
-        .status(404)
-        .send({ status: false, message: `Zone '${req.body.zone}' not found in PowerDNS.` });
-    }
-
+    // === Validation Section (always do first!) ===
     if (!zone || typeof zone !== 'string') {
       return res.status(400).send({ status: false, message: 'Zone (string) is required.' });
     }
-
     if (!recordName || typeof recordName !== 'string') {
       return res.status(400).send({ status: false, message: 'recordName (string) is required for update.' });
     }
-
     if (!recordNameRegex.test(recordName)) {
       return res.status(400).send({ status: false, message: `Invalid record name '${recordName}'. Hostname cannot start with a number or hyphen.` });
     }
-
     if (!type || typeof type !== 'string') {
       return res.status(400).send({ status: false, message: 'Record type (string) is required.' });
     }
-
     if (!Array.isArray(records) || records.length === 0) {
       return res.status(400).send({ status: false, message: 'records (array) with at least one record is required.' });
     }
-
     const recordType = type.toUpperCase();
     if (!allowedTypes.includes(recordType)) {
       return res.status(400).send({
@@ -527,8 +584,6 @@ export const updateRecord = async (req, res) => {
         message: `Invalid record type: '${type}'. Allowed types are: ${allowedTypes.join(', ')}`
       });
     }
-
-    // ✅ Validate each record content
     for (const record of records) {
       if (!record.content || typeof record.content !== 'string') {
         return res.status(400).send({
@@ -536,22 +591,37 @@ export const updateRecord = async (req, res) => {
           message: 'Each record in records array must have content (string).'
         });
       }
-
-      // ✅ Correct validation call
       const validationError = validateRecordContent(res, recordType, record.content);
       if (validationError) return validationError;
     }
-
     if (newRecordName && typeof newRecordName !== 'string') {
       return res.status(400).send({ status: false, message: 'newRecordName must be a string if provided.' });
     }
-
     if (ttl && (typeof ttl !== 'number' || ttl < 60)) {
       return res.status(400).send({ status: false, message: 'TTL must be a number greater than or equal to 60.' });
     }
 
-    
+    // === Latency Measurement around Service Call ===
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
 
+    const start = Date.now();
+    const data = await updateRecordService({ zone, recordName, type, records, ttl, newRecordName });
+    const lastMeasuredLatency = Date.now() - start;
+
+    // ✅ Handle zone not found
+    if (data?.notFound) {
+      return res
+        .status(404)
+        .send({ status: false, message: `Zone '${zone}' not found in PowerDNS.` });
+    }
+
+    // Save zone query statistics
+    await ZoneStats.updateOne(
+      { zone, hour: roundedHour },
+      { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+      { upsert: true }
+    );
 
     return res.status(200).send({
       status: true,
@@ -566,6 +636,7 @@ export const updateRecord = async (req, res) => {
 };
 
 
+
 /** ================================
  *  DELETE RECORD CONTROLLER
  *  ================================ */
@@ -576,15 +647,12 @@ export const deleteRecord = async (req, res) => {
     if (!zone || typeof zone !== 'string') {
       return res.status(400).send({ status: false, message: 'Zone (string) is required.' });
     }
-
     if (!recordName || typeof recordName !== 'string') {
       return res.status(400).send({ status: false, message: 'recordName (string) is required for update.' });
     }
-
     if (!recordNameRegex.test(recordName)) {
       return res.status(400).send({ status: false, message: `Invalid record name '${recordName}'. Hostname cannot start with a number or hyphen.` });
     }
-
     if (!type || typeof type !== 'string') {
       return res.status(400).send({ status: false, message: 'Record type (string) is required.' });
     }
@@ -596,21 +664,31 @@ export const deleteRecord = async (req, res) => {
       });
     }
 
+    // === Latency Measurement around Service Call ===
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
 
+    const start = Date.now();
     const data = await deleteRecordService({ zone, recordName, type });
+    const lastMeasuredLatency = Date.now() - start;
 
     if (data?.notFound) {
       return res
         .status(404)
         .send({ status: false, message: `Zone '${zone}' not found in PowerDNS.` });
     }
-
     if (data?.recordNotFound) {
       return res
         .status(404)
         .send({ status: false, message: `Record '${recordName}' of type '${type}' not found in zone '${zone}'.` });
     }
 
+    // Save zone query statistics
+    await ZoneStats.updateOne(
+      { zone, hour: roundedHour },
+      { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+      { upsert: true }
+    );
 
     return res.status(200).send({
       status: true,
@@ -623,6 +701,7 @@ export const deleteRecord = async (req, res) => {
     return res.status(500).send({ status: false, message: 'Internal Server Error.' });
   }
 };
+
 
 // ✅ Controller: Get PowerDNS Server Status
 export const getServerStatus = async (req, res) => {
@@ -682,7 +761,6 @@ export const getServerStatus = async (req, res) => {
 //scan domain 
 
 import { scanDNSRecords } from '../services/dnsScanService.js';
-
 /**
  * Scan domain + validate nameservers
  */
@@ -705,9 +783,16 @@ export const scanDomainController = async (req, res) => {
       // 'ns1.sparrowhost.com',
       // 'ns2.sparrowhost.com'
     ];
-
+    // Start measuring latency
+    const now = new Date();
+    const roundedHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+    const start = Date.now();
     // 🔍 Perform DNS scan
     const { records, hasAnyRecord, isValidNS } = await scanDNSRecords(domain, ourNameservers);
+
+    const lastMeasuredLatency = Date.now() - start;
+
+
 
     if (!hasAnyRecord) {
       return res.status(404).json({
@@ -719,6 +804,12 @@ export const scanDomainController = async (req, res) => {
       });
     }
 
+ // Save zone query statistics
+ await ZoneStats.updateOne(
+  { zone: domain, hour: roundedHour },
+  { $inc: { queries: 1 }, $set: { latency: lastMeasuredLatency } },
+  { upsert: true }
+);
     return res.status(200).json({
       success: true,
       domain,
@@ -915,6 +1006,111 @@ export const checkNameserverController = async (req, res) => {
     });
   }
 };
+
+////////////////////////////////////////////////////////////////////////////////
+
+import {fetchDNSQueryStats} from '../services/powerdnsService.js';
+
+export const getDNSQueries24h = async (req, res) => {
+  try {
+    console.log("getDNSQueries24h",getDNSQueries24h);
+
+    const stats = await fetchDNSQueryStats();
+    if (stats.status === false) {
+      return res.status(502).json(stats);
+    }
+    return res.status(200).json({
+      status: true,
+      message: 'DNS query stats fetched successfully',
+      data: stats.data
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to fetch DNS stats from PowerDNS',
+      error: error.message
+    });
+  }
+};
+
+
+/**    getZoneDNSQueries24h     */
+
+import ZoneStats from '../models/zoneStatsModel.js';
+
+export const getZoneDNSQueries24h = async (req, res) => {
+  try {
+    let { zone } = req.body;
+    if (!zone) {
+      return res.status(400).json({
+        status: false,
+        message: 'Zone is required || zone is incorrect'
+      });
+    }
+
+    // Check for trailing dot (DNS zone name must end with '.')
+    if (!zone.endsWith('.')) {
+      return res.status(400).json({
+        status: false,
+        message: 'Zone name must end with a trailing dot (e.g., ind.mom.).'
+      });
+    }
+
+    // Get current UTC time
+    const now = new Date();
+
+    // 24h window for aggregation (inclusive of current time)
+    const last24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    // 24h stats: sum queries for all hours in the last 24 hours+current hour
+    const last24hStats = await ZoneStats.find({ zone, hour: { $gte: last24hStart, $lte: now } });
+    console.log('Fetched ZoneStats for 24h:', last24hStats);
+
+    // If no data found for this zone in 24h window, send error
+    if (!last24hStats || last24hStats.length === 0) {
+      return res.status(404).json({
+        status: false,
+        message: `No stats found for zone "${zone}" in last 24 hours.`
+      });
+    }
+
+    const todayQueries = last24hStats.reduce((sum, stat) => sum + stat.queries, 0);
+    const avgResponseTime = last24hStats.length
+      ? Math.round(last24hStats.reduce((sum, stat) => sum + stat.latency, 0) / last24hStats.length)
+      : 'N/A';
+
+    // Previous 24h window (the day before last 24h)
+    const prev24hStart = new Date(last24hStart.getTime() - 24 * 60 * 60 * 1000);
+    const prev24hEnd = last24hStart;
+    const prev24hStats = await ZoneStats.find({ zone, hour: { $gte: prev24hStart, $lt: prev24hEnd } });
+    const yesterdayQueries = prev24hStats.reduce((sum, stat) => sum + stat.queries, 0);
+
+    let changeFromYesterday = 'N/A';
+    if (yesterdayQueries) {
+      changeFromYesterday = (((todayQueries - yesterdayQueries) / yesterdayQueries) * 100).toFixed(1) + '%';
+      if (+changeFromYesterday > 0) changeFromYesterday = '+' + changeFromYesterday;
+    }
+
+    return res.status(200).json({
+      status: true,
+      message: "Zone DNS query stats fetched successfully",
+      data: {
+        zone,
+        totalQueries24h: todayQueries,
+        avgResponseTime: avgResponseTime === 'N/A' ? 'N/A' : `${avgResponseTime}ms`,
+        changeFromYesterday
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: false,
+      message: "Failed to fetch zone DNS stats",
+      error: error.message
+    });
+  }
+};
+
+
 
 
 
