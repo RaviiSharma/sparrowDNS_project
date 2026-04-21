@@ -372,13 +372,4 @@ This project is licensed under the MIT License.
 4. Push to branch: `git push origin feature/amazing-feature`
 5. Open a Pull Request
 
-## 📧 Support
 
-For issues and questions:
-
-- GitHub Issues: [github.com/yourusername/sparrow_dns/issues](https://github.com/yourusername/sparrow_dns/issues)
-- Email: support@sparrowdns.com
-
----
-
-Built with ❤️ by the Sparrow DNS Team
